@@ -4,6 +4,9 @@ SqlSync is a `.NET 10` console app that connects to SQL Server and exports datab
 - Table schema (`CREATE TABLE`)
 - Primary keys and foreign keys
 - Optional sample data (`TOP N` rows per table as `INSERT` statements)
+- Views (`CREATE VIEW` definitions when available)
+- Stored procedures and functions (`CREATE/ALTER` definitions when available)
+- Database users (`CREATE USER` statements, best-effort)
 
 ## Usage
 

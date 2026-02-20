@@ -281,6 +281,18 @@ internal sealed class ContextScriptGenerator
             sb.AppendLine();
         }
 
+        var views = await GetViewsAsync(connection);
+        AppendProgrammableObjectsSection(sb, "Views", views);
+
+        var procedures = await GetStoredProceduresAsync(connection);
+        AppendProgrammableObjectsSection(sb, "Stored Procedures", procedures);
+
+        var functions = await GetFunctionsAsync(connection);
+        AppendProgrammableObjectsSection(sb, "Functions", functions);
+
+        var users = await GetUsersAsync(connection);
+        AppendUsersSection(sb, users);
+
         await File.WriteAllTextAsync(_options.OutputPath, sb.ToString());
     }
 
@@ -458,6 +470,122 @@ internal sealed class ContextScriptGenerator
             .ToList();
     }
 
+    private static async Task<List<DbProgrammableObject>> GetViewsAsync(SqlConnection connection)
+    {
+        const string sql =
+            """
+            SELECT
+                s.name AS SchemaName,
+                v.name AS ObjectName,
+                m.definition AS Definition
+            FROM sys.views v
+            INNER JOIN sys.schemas s ON v.schema_id = s.schema_id
+            LEFT JOIN sys.sql_modules m ON v.object_id = m.object_id
+            WHERE v.is_ms_shipped = 0
+            ORDER BY s.name, v.name;
+            """;
+
+        return await ReadProgrammableObjectsAsync(connection, sql, "VIEW");
+    }
+
+    private static async Task<List<DbProgrammableObject>> GetStoredProceduresAsync(SqlConnection connection)
+    {
+        const string sql =
+            """
+            SELECT
+                s.name AS SchemaName,
+                p.name AS ObjectName,
+                m.definition AS Definition
+            FROM sys.procedures p
+            INNER JOIN sys.schemas s ON p.schema_id = s.schema_id
+            LEFT JOIN sys.sql_modules m ON p.object_id = m.object_id
+            WHERE p.is_ms_shipped = 0
+            ORDER BY s.name, p.name;
+            """;
+
+        return await ReadProgrammableObjectsAsync(connection, sql, "PROCEDURE");
+    }
+
+    private static async Task<List<DbProgrammableObject>> GetFunctionsAsync(SqlConnection connection)
+    {
+        const string sql =
+            """
+            SELECT
+                s.name AS SchemaName,
+                o.name AS ObjectName,
+                m.definition AS Definition
+            FROM sys.objects o
+            INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
+            LEFT JOIN sys.sql_modules m ON o.object_id = m.object_id
+            WHERE o.is_ms_shipped = 0
+              AND o.type IN ('FN', 'IF', 'TF', 'FS', 'FT', 'AF')
+            ORDER BY s.name, o.name;
+            """;
+
+        return await ReadProgrammableObjectsAsync(connection, sql, "FUNCTION");
+    }
+
+    private static async Task<List<DbProgrammableObject>> ReadProgrammableObjectsAsync(SqlConnection connection, string sql, string objectType)
+    {
+        await using var cmd = new SqlCommand(sql, connection);
+        await using var reader = await cmd.ExecuteReaderAsync();
+
+        var objects = new List<DbProgrammableObject>();
+        while (await reader.ReadAsync())
+        {
+            objects.Add(new DbProgrammableObject(
+                ObjectType: objectType,
+                Schema: reader.GetString(reader.GetOrdinal("SchemaName")),
+                Name: reader.GetString(reader.GetOrdinal("ObjectName")),
+                Definition: reader.IsDBNull(reader.GetOrdinal("Definition"))
+                    ? null
+                    : reader.GetString(reader.GetOrdinal("Definition"))));
+        }
+
+        return objects;
+    }
+
+    private static async Task<List<DbUser>> GetUsersAsync(SqlConnection connection)
+    {
+        const string sql =
+            """
+            SELECT
+                dp.name AS UserName,
+                dp.type_desc AS UserType,
+                dp.authentication_type_desc AS AuthenticationType,
+                dp.default_schema_name AS DefaultSchema,
+                sp.name AS LoginName
+            FROM sys.database_principals dp
+            LEFT JOIN sys.server_principals sp ON dp.sid = sp.sid
+            WHERE dp.principal_id > 4
+              AND dp.type IN ('S', 'U', 'G', 'E', 'X')
+              AND dp.name NOT IN ('dbo', 'guest', 'INFORMATION_SCHEMA', 'sys')
+            ORDER BY dp.name;
+            """;
+
+        await using var cmd = new SqlCommand(sql, connection);
+        await using var reader = await cmd.ExecuteReaderAsync();
+
+        var users = new List<DbUser>();
+        while (await reader.ReadAsync())
+        {
+            users.Add(new DbUser(
+                Name: reader.GetString(reader.GetOrdinal("UserName")),
+                UserType: reader.GetString(reader.GetOrdinal("UserType")),
+                AuthenticationType: reader.IsDBNull(reader.GetOrdinal("AuthenticationType"))
+                    ? null
+                    : reader.GetString(reader.GetOrdinal("AuthenticationType")),
+                DefaultSchema: reader.IsDBNull(reader.GetOrdinal("DefaultSchema"))
+                    ? null
+                    : reader.GetString(reader.GetOrdinal("DefaultSchema")),
+                LoginName: reader.IsDBNull(reader.GetOrdinal("LoginName"))
+                    ? null
+                    : reader.GetString(reader.GetOrdinal("LoginName"))));
+        }
+
+        return users;
+    }
+
     private static void AppendCreateTable(StringBuilder sb, DbTable table, List<DbColumn> columns, List<string> primaryKey)
     {
         sb.AppendLine($"-- Table: {table.Schema}.{table.Name}");
@@ -485,6 +613,78 @@ internal sealed class ContextScriptGenerator
             sb.AppendLine(
                 $"ALTER TABLE {SqlName(table.Schema, table.Name)} ADD CONSTRAINT {SqlName(fk.Name)} FOREIGN KEY ({string.Join(", ", fk.ParentColumns.Select(SqlName))}) REFERENCES {SqlName(fk.ReferencedSchema, fk.ReferencedTable)} ({string.Join(", ", fk.ReferencedColumns.Select(SqlName))});");
         }
+    }
+
+    private static void AppendProgrammableObjectsSection(StringBuilder sb, string sectionName, List<DbProgrammableObject> objects)
+    {
+        sb.AppendLine($"-- ===== {sectionName} =====");
+        if (objects.Count == 0)
+        {
+            sb.AppendLine("-- (none)");
+            sb.AppendLine();
+            return;
+        }
+
+        foreach (var item in objects)
+        {
+            sb.AppendLine($"-- {item.ObjectType}: {item.Schema}.{item.Name}");
+            if (string.IsNullOrWhiteSpace(item.Definition))
+            {
+                sb.AppendLine($"-- Definition unavailable for {item.Schema}.{item.Name} (possibly encrypted).");
+                sb.AppendLine();
+                continue;
+            }
+
+            sb.AppendLine(item.Definition.Trim());
+            sb.AppendLine("GO");
+            sb.AppendLine();
+        }
+    }
+
+    private static void AppendUsersSection(StringBuilder sb, List<DbUser> users)
+    {
+        sb.AppendLine("-- ===== Users =====");
+        if (users.Count == 0)
+        {
+            sb.AppendLine("-- (none)");
+            sb.AppendLine();
+            return;
+        }
+
+        foreach (var user in users)
+        {
+            sb.AppendLine($"-- UserType={user.UserType}; AuthenticationType={user.AuthenticationType ?? "UNKNOWN"}");
+            sb.AppendLine(BuildCreateUserStatement(user));
+            sb.AppendLine("GO");
+            sb.AppendLine();
+        }
+    }
+
+    private static string BuildCreateUserStatement(DbUser user)
+    {
+        var sb = new StringBuilder();
+        sb.Append($"CREATE USER {SqlName(user.Name)}");
+
+        if (!string.IsNullOrWhiteSpace(user.LoginName))
+        {
+            sb.Append($" FOR LOGIN {SqlName(user.LoginName)}");
+        }
+        else if (string.Equals(user.AuthenticationType, "EXTERNAL", StringComparison.OrdinalIgnoreCase))
+        {
+            sb.Append(" FROM EXTERNAL PROVIDER");
+        }
+        else if (string.Equals(user.AuthenticationType, "DATABASE", StringComparison.OrdinalIgnoreCase))
+        {
+            sb.Append(" WITHOUT LOGIN");
+        }
+
+        if (!string.IsNullOrWhiteSpace(user.DefaultSchema))
+        {
+            sb.Append($" WITH DEFAULT_SCHEMA = {SqlName(user.DefaultSchema)}");
+        }
+
+        sb.Append(";");
+        return sb.ToString();
     }
 
     private async Task AppendSampleDataAsync(StringBuilder sb, SqlConnection connection, DbTable table, List<DbColumn> columns)
@@ -636,3 +836,16 @@ internal sealed record DbForeignKey(
     string ReferencedTable,
     IReadOnlyList<string> ParentColumns,
     IReadOnlyList<string> ReferencedColumns);
+
+internal sealed record DbProgrammableObject(
+    string ObjectType,
+    string Schema,
+    string Name,
+    string? Definition);
+
+internal sealed record DbUser(
+    string Name,
+    string UserType,
+    string? AuthenticationType,
+    string? DefaultSchema,
+    string? LoginName);
