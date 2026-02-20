@@ -152,7 +152,7 @@ internal sealed record CliOptions(
               -t, --top <n>               Top N sample rows per table (default: 10)
                   --schema-only           Export schema only
                   --include-data          Export schema + sample data (default)
-                  --tables <list>         Comma-separated table names (dbo.Users,sales.Orders)
+                  --tables <list>         Comma-separated table names (dbo.Users,[sales].[Orders])
               -h, --help                  Show this help
             """);
     }
@@ -172,9 +172,92 @@ internal sealed record CliOptions(
     {
         var values = input
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(static name => name.Contains('.') ? name : $"dbo.{name}");
+            .Select(NormalizeQualifiedObjectName);
 
         return new HashSet<string>(values, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeQualifiedObjectName(string rawName)
+    {
+        var trimmed = rawName.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            throw new ArgumentException("Object name cannot be empty.");
+        }
+
+        var parts = SplitQualifiedName(trimmed);
+        if (parts.Count == 1)
+        {
+            return $"dbo.{NormalizeIdentifier(parts[0])}";
+        }
+
+        if (parts.Count == 2)
+        {
+            return $"{NormalizeIdentifier(parts[0])}.{NormalizeIdentifier(parts[1])}";
+        }
+
+        throw new ArgumentException($"Invalid object name '{rawName}'. Use name, schema.name, or [schema].[name].");
+    }
+
+    private static List<string> SplitQualifiedName(string value)
+    {
+        var parts = new List<string>();
+        var current = new StringBuilder();
+        var inBrackets = false;
+
+        foreach (var ch in value)
+        {
+            if (ch == '[')
+            {
+                inBrackets = true;
+                current.Append(ch);
+                continue;
+            }
+
+            if (ch == ']')
+            {
+                inBrackets = false;
+                current.Append(ch);
+                continue;
+            }
+
+            if (ch == '.' && !inBrackets)
+            {
+                parts.Add(current.ToString().Trim());
+                current.Clear();
+                continue;
+            }
+
+            current.Append(ch);
+        }
+
+        if (inBrackets)
+        {
+            throw new ArgumentException($"Invalid object name '{value}'. Missing closing bracket.");
+        }
+
+        if (current.Length > 0)
+        {
+            parts.Add(current.ToString().Trim());
+        }
+
+        return parts.Where(static p => !string.IsNullOrWhiteSpace(p)).ToList();
+    }
+
+    private static string NormalizeIdentifier(string value)
+    {
+        var trimmed = value.Trim();
+        if (trimmed.StartsWith('[', StringComparison.Ordinal) && trimmed.EndsWith(']', StringComparison.Ordinal))
+        {
+            trimmed = trimmed[1..^1].Replace("]]", "]", StringComparison.Ordinal);
+        }
+
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            throw new ArgumentException("Identifier cannot be empty.");
+        }
+
+        return trimmed;
     }
 }
 

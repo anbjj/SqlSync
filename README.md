@@ -22,7 +22,7 @@ Options:
 - `-t, --top <n>`: Top rows per table (default `10`)
 - `--schema-only`: Export schema only
 - `--include-data`: Export schema + sample data (default)
-- `--tables <list>`: Comma-separated table list, e.g. `dbo.Users,sales.Orders`
+- `--tables <list>`: Comma-separated table list, e.g. `dbo.Users,[sales].[Orders],dbo.[Line Items]`
 - `-h, --help`: Show help
 
 You can also provide the connection string via environment variable:
