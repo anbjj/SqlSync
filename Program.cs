@@ -9,24 +9,51 @@ if (options.ShowHelp)
     return;
 }
 
-if (string.IsNullOrWhiteSpace(options.ConnectionString))
-{
-    Console.Error.WriteLine("Missing connection string. Use --connection or SQLSYNC_CONNECTION_STRING.");
-    CliOptions.PrintHelp();
-    Environment.ExitCode = 1;
-    return;
-}
-
 try
 {
-    var generator = new ContextScriptGenerator(options);
+    var connectionStore = new ConnectionStringStore("connstr");
+    var resolvedConnectionString = await ResolveConnectionStringAsync(options, connectionStore);
+    if (string.IsNullOrWhiteSpace(resolvedConnectionString))
+    {
+        Console.Error.WriteLine("Missing connection string. Use --connection, --connection-name, or SQLSYNC_CONNECTION_STRING.");
+        CliOptions.PrintHelp();
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    var resolvedOptions = options with { ConnectionString = resolvedConnectionString };
+    var generator = new ContextScriptGenerator(resolvedOptions);
     await generator.GenerateAsync();
-    Console.WriteLine($"Wrote context script to {options.OutputPath}");
+    Console.WriteLine($"Wrote context script to {resolvedOptions.OutputPath}");
 }
 catch (Exception ex)
 {
     Console.Error.WriteLine($"Failed: {ex.Message}");
     Environment.ExitCode = 1;
+}
+
+static async Task<string> ResolveConnectionStringAsync(CliOptions options, ConnectionStringStore store)
+{
+    var connectionString = options.ConnectionString;
+
+    if (!string.IsNullOrWhiteSpace(options.ConnectionName))
+    {
+        connectionString = await store.LoadAsync(options.ConnectionName);
+        Console.WriteLine($"Loaded connection profile '{options.ConnectionName}' from connstr/.");
+    }
+
+    if (!string.IsNullOrWhiteSpace(options.SaveConnectionName))
+    {
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            throw new ArgumentException("--save-connection requires --connection, --connection-name, or SQLSYNC_CONNECTION_STRING.");
+        }
+
+        await store.SaveAsync(options.SaveConnectionName, connectionString);
+        Console.WriteLine($"Saved connection profile '{options.SaveConnectionName}' to connstr/.");
+    }
+
+    return connectionString;
 }
 
 internal sealed record CliOptions(
@@ -35,6 +62,8 @@ internal sealed record CliOptions(
     bool IncludeData,
     int TopRows,
     IReadOnlySet<string>? TableFilter,
+    string? ConnectionName,
+    string? SaveConnectionName,
     bool ShowHelp)
 {
     private const string DefaultOutput = "sqlsync-context.sql";
@@ -46,6 +75,8 @@ internal sealed record CliOptions(
         bool includeData = true;
         int topRows = 10;
         HashSet<string>? tableFilter = null;
+        string? connectionName = null;
+        string? saveConnectionName = null;
         bool showHelp = false;
 
         for (var i = 0; i < args.Length; i++)
@@ -88,12 +119,20 @@ internal sealed record CliOptions(
                     tableFilter = ParseTableFilter(ReadValue(args, ref i, arg));
                     break;
 
+                case "--connection-name":
+                    connectionName = ReadValue(args, ref i, arg);
+                    break;
+
+                case "--save-connection":
+                    saveConnectionName = ReadValue(args, ref i, arg);
+                    break;
+
                 default:
                     throw new ArgumentException($"Unknown option: {arg}");
             }
         }
 
-        return new CliOptions(connection, output, includeData, topRows, tableFilter, showHelp);
+        return new CliOptions(connection, output, includeData, topRows, tableFilter, connectionName, saveConnectionName, showHelp);
     }
 
     public static void PrintHelp()
@@ -107,6 +146,8 @@ internal sealed record CliOptions(
 
             Options:
               -c, --connection <value>    SQL Server connection string (or SQLSYNC_CONNECTION_STRING)
+                  --connection-name <n>   Load connection from connstr/<n>.txt
+                  --save-connection <n>   Save resolved connection to connstr/<n>.txt
               -o, --output <path>         Output .sql path (default: sqlsync-context.sql)
               -t, --top <n>               Top N sample rows per table (default: 10)
                   --schema-only           Export schema only
@@ -134,6 +175,62 @@ internal sealed record CliOptions(
             .Select(static name => name.Contains('.') ? name : $"dbo.{name}");
 
         return new HashSet<string>(values, StringComparer.OrdinalIgnoreCase);
+    }
+}
+
+internal sealed class ConnectionStringStore
+{
+    private readonly string _directoryPath;
+
+    public ConnectionStringStore(string directoryPath)
+    {
+        _directoryPath = directoryPath;
+    }
+
+    public async Task SaveAsync(string profileName, string connectionString)
+    {
+        var path = GetProfilePath(profileName);
+        Directory.CreateDirectory(_directoryPath);
+        await File.WriteAllTextAsync(path, connectionString.Trim());
+    }
+
+    public async Task<string> LoadAsync(string profileName)
+    {
+        var path = GetProfilePath(profileName);
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException($"Connection profile '{profileName}' was not found in {_directoryPath}.", path);
+        }
+
+        return (await File.ReadAllTextAsync(path)).Trim();
+    }
+
+    private string GetProfilePath(string profileName)
+    {
+        var safeName = ValidateProfileName(profileName);
+        return Path.Combine(_directoryPath, $"{safeName}.txt");
+    }
+
+    private static string ValidateProfileName(string profileName)
+    {
+        var trimmed = profileName.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+        {
+            throw new ArgumentException("Connection profile name cannot be empty.");
+        }
+
+        if (trimmed.Contains('/') || trimmed.Contains('\\') || trimmed.Contains("..", StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Connection profile name cannot include path separators.");
+        }
+
+        var invalidChars = Path.GetInvalidFileNameChars();
+        if (trimmed.IndexOfAny(invalidChars) >= 0)
+        {
+            throw new ArgumentException("Connection profile name contains invalid filename characters.");
+        }
+
+        return trimmed;
     }
 }
 

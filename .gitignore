@@ -11,3 +11,8 @@ obj/
 
 # JetBrains Rider
 .idea/
+
+# Sensitive local files
+connstr/
+sqlsync-context.sql
+*-context.sql
